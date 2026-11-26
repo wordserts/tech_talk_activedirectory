@@ -1,0 +1,200 @@
+{
+  "title": "AD - Act on risky user-account behaviour",
+  "description": "Every 15 min: password spray -> SecOps + watchlist; tier-0 group change -> ServiceNow change check + page on-call; lockout storm -> service desk with caller device.",
+  "tasks": {
+    "detect_password_spray": {
+      "name": "detect_password_spray",
+      "action": "dynatrace.automations:execute-dql-query",
+      "description": "4625 / 4771 failures on 10+ accounts from one source (last 15 min)",
+      "input": {
+        "query": "fetch logs, from: now()-15m\n| filter matchesValue(winlog.eventid, \"4625\") or matchesValue(winlog.eventid, \"4771\")\n| filterOut matchesPhrase(content, \"The EventSystem sub system is suppressing duplicate event log entries\")\n| parse content, \"\"\"DATA 'Account For Which Logon Failed:' DATA 'Account Name:' SPACE? LD:acct_4625 EOL\"\"\"\n| parse content, \"\"\"DATA 'Source Network Address:' SPACE? LD:src_4625 EOL\"\"\"\n| parse content, \"\"\"DATA 'Account Information:' DATA 'Account Name:' SPACE? LD:acct_4771 EOL\"\"\"\n| parse content, \"\"\"DATA 'Client Address:' SPACE? LD:src_4771 EOL\"\"\"\n| fieldsAdd account = lower(trim(coalesce(acct_4625, acct_4771)))\n| fieldsAdd source = replaceString(trim(coalesce(src_4625, src_4771)), \"::ffff:\", \"\")\n| filterOut isNull(source) or source == \"-\" or source == \"::1\" or source == \"127.0.0.1\"\n| filterOut isNull(account) or account == \"-\" or endsWith(account, \"$\")\n| summarize failures = count(), accounts = countDistinct(account), sample_accounts = collectDistinct(account, maxLength: 10),\n    dcs = collectDistinct(host.name), first_seen = min(timestamp), last_seen = max(timestamp), by: {source}\n| filter accounts >= 10\n| sort accounts desc\n| limit 50"
+      },
+      "position": {
+        "x": 0,
+        "y": 1
+      },
+      "predecessors": [],
+      "conditions": {
+        "states": {},
+        "custom": ""
+      }
+    },
+    "notify_secops_spray": {
+      "name": "notify_secops_spray",
+      "action": "dynatrace.email:send-email",
+      "description": "Notify SecOps",
+      "input": {
+        "to": [
+          "secops@example.com"
+        ],
+        "cc": [],
+        "bcc": [],
+        "subject": "[AD] Password spray from {{ result(\"detect_password_spray\").records | length }} source(s)",
+        "content": "Password spray detected in the last 15 minutes ({{ result(\"detect_password_spray\").records | length }} source(s)).\nEach source below failed logon (4625) or Kerberos pre-auth (4771) against 10+ different accounts.\n\n{% for r in result(\"detect_password_spray\").records %}\n- Source {{ r.source }}: {{ r.accounts }} accounts, {{ r.failures }} failures, seen by {{ r.dcs | join(\", \") }}\n  Sample accounts: {{ r.sample_accounts | join(\", \") }}\n  Window: {{ r.first_seen }} to {{ r.last_seen }}\n{% endfor %}\n\nThese sources have been added to the watchlist (bizevents: event.type == \"ad.watchlist.add\").\nWorkflow execution: {{ execution().id }}"
+      },
+      "position": {
+        "x": 0,
+        "y": 2
+      },
+      "predecessors": [
+        "detect_password_spray"
+      ],
+      "conditions": {
+        "states": {
+          "detect_password_spray": "OK"
+        },
+        "custom": "{{ result(\"detect_password_spray\").records | length > 0 }}"
+      }
+    },
+    "watchlist_spray_sources": {
+      "name": "watchlist_spray_sources",
+      "action": "dynatrace.automations:run-javascript",
+      "description": "Add each source to the watchlist (bizevent)",
+      "input": {
+        "script": "// Watchlist each spraying source as a business event (event.type = ad.watchlist.add).\n// Dashboards and later runs can query it: fetch bizevents | filter event.type == \"ad.watchlist.add\"\nimport { execution } from '@dynatrace-sdk/automation-utils';\nimport { businessEventsClient } from '@dynatrace-sdk/client-classic-environment-v2';\n\nexport default async function ({ executionId }) {\n  const ex = await execution(executionId);\n  const { records } = await ex.result('detect_password_spray');\n  if (!records?.length) return { watchlisted: 0 };\n\n  const events = records.map((r) => ({\n    'event.provider': 'ad-risky-accounts-workflow',\n    'event.type': 'ad.watchlist.add',\n    'watchlist.reason': 'password_spray',\n    'source.ip': r.source,\n    'spray.accounts': Number(r.accounts),\n    'spray.failures': Number(r.failures),\n    'spray.sample_accounts': (r.sample_accounts || []).join(', '),\n    'workflow.execution_id': executionId,\n  }));\n  await businessEventsClient.ingest({ body: events, type: 'application/json' });\n  return { watchlisted: events.length, sources: records.map((r) => r.source) };\n}\n"
+      },
+      "position": {
+        "x": 0,
+        "y": 3
+      },
+      "predecessors": [
+        "notify_secops_spray"
+      ],
+      "conditions": {
+        "states": {
+          "notify_secops_spray": "OK"
+        },
+        "custom": "{{ result(\"detect_password_spray\").records | length > 0 }}"
+      }
+    },
+    "detect_privileged_group_change": {
+      "name": "detect_privileged_group_change",
+      "action": "dynatrace.automations:execute-dql-query",
+      "description": "4728 / 4732 / 4756 on tier-0 groups (last 15 min)",
+      "input": {
+        "query": "fetch logs, from: now()-15m\n| filter matchesValue(winlog.eventid, \"4728\") or matchesValue(winlog.eventid, \"4732\") or matchesValue(winlog.eventid, \"4756\")\n| filterOut matchesPhrase(content, \"The EventSystem sub system is suppressing duplicate event log entries\")\n| parse content, \"\"\"DATA 'Subject:' DATA 'Account Name:' SPACE? LD:changed_by EOL\"\"\"\n| parse content, \"\"\"DATA 'Member:' DATA 'Account Name:' SPACE? LD:member_dn EOL\"\"\"\n| parse content, \"\"\"DATA 'Group Name:' SPACE? LD:group_name EOL\"\"\"\n| parse content, \"\"\"DATA 'Group Domain:' SPACE? LD:group_domain EOL\"\"\"\n| fieldsAdd group_name = trim(group_name), group_domain = trim(group_domain), changed_by = trim(changed_by), member_dn = trim(member_dn)\n| filter in(lower(group_name), array(\"domain admins\", \"enterprise admins\", \"schema admins\", \"administrators\", \"account operators\", \"backup operators\", \"server operators\", \"print operators\", \"dnsadmins\", \"group policy creator owners\", \"key admins\", \"enterprise key admins\"))\n| fieldsAdd member = if(startsWith(member_dn, \"CN=\"), substring(member_dn, from: 3, to: indexOf(member_dn, \",\")), else: member_dn)\n| fieldsAdd event_id = toString(winlog.eventid), dc = host.name\n| fields timestamp, dc, event_id, group = group_name, group_domain, member, member_dn, changed_by\n| sort timestamp desc\n| limit 50"
+      },
+      "position": {
+        "x": 1,
+        "y": 1
+      },
+      "predecessors": [],
+      "conditions": {
+        "states": {},
+        "custom": ""
+      }
+    },
+    "check_change_window": {
+      "name": "check_change_window",
+      "action": "dynatrace.automations:run-javascript",
+      "description": "Look up an approved ServiceNow change",
+      "input": {
+        "script": "// Look for an approved ServiceNow change in \"Implement\" state that mentions the member being added.\n// Never fails the workflow: with no credential or no reachable ServiceNow it reports \"NOT CHECKED\",\n// so the page still goes out.\nimport { execution } from '@dynatrace-sdk/automation-utils';\nimport { credentialVaultClient } from '@dynatrace-sdk/client-classic-environment-v2';\n\nconst SNOW_INSTANCE = 'https://YOUR_INSTANCE.service-now.com';   // also add to Settings > External requests\nconst CREDENTIAL_ID = 'CREDENTIALS_VAULT-XXXXXXXXXXXXXXXX';     // user/password credential, scope: App Engine\n\nexport default async function ({ executionId }) {\n  const ex = await execution(executionId);\n  const { records } = await ex.result('detect_privileged_group_change');\n\n  let auth = null;\n  try {\n    const c = await credentialVaultClient.getCredentialsDetails({ id: CREDENTIAL_ID });\n    auth = 'Basic ' + btoa(`${c.username}:${c.password}`);\n  } catch (e) {\n    console.log('ServiceNow credential not available: ' + e);\n  }\n\n  const changes = [];\n  for (const r of records) {\n    let status = 'NOT CHECKED';\n    if (auth) {\n      try {\n        const q = encodeURIComponent(`state=-1^short_descriptionLIKE${r.member}^ORdescriptionLIKE${r.member}`);\n        const url = `${SNOW_INSTANCE}/api/now/table/change_request?sysparm_query=${q}` +\n                    '&sysparm_fields=number,short_description&sysparm_limit=5';\n        const res = await fetch(url, { headers: { Authorization: auth, Accept: 'application/json' } });\n        if (res.ok) {\n          const found = (await res.json()).result || [];\n          status = found.length ? found.map((c) => c.number).join(', ') : 'NO APPROVED CHANGE';\n        } else {\n          console.log(`ServiceNow returned ${res.status}`);\n        }\n      } catch (e) {\n        console.log('ServiceNow lookup failed: ' + e);\n      }\n    }\n    changes.push({ ...r, change: status });\n  }\n  return { changes, without_change: changes.filter((c) => c.change === 'NO APPROVED CHANGE').length };\n}\n"
+      },
+      "position": {
+        "x": 1,
+        "y": 2
+      },
+      "predecessors": [
+        "detect_privileged_group_change"
+      ],
+      "conditions": {
+        "states": {
+          "detect_privileged_group_change": "OK"
+        },
+        "custom": "{{ result(\"detect_privileged_group_change\").records | length > 0 }}"
+      }
+    },
+    "page_oncall_group_change": {
+      "name": "page_oncall_group_change",
+      "action": "dynatrace.email:send-email",
+      "description": "Page on-call with the change check result",
+      "input": {
+        "to": [
+          "ad-oncall@example.com"
+        ],
+        "cc": [],
+        "bcc": [],
+        "subject": "[AD][PAGE] Tier-0 group change: {{ result(\"check_change_window\").without_change }} without an approved change",
+        "content": "PAGE: tier-0 group membership changed.\n\n{% for r in result(\"check_change_window\").changes %}\n- {{ r.member }} added to {{ r.group }} ({{ r.group_domain }}) by {{ r.changed_by }} on {{ r.dc }} at {{ r.timestamp }} (event {{ r.event_id }})\n  Change record: {{ r.change }}\n{% endfor %}\n\nIf there is no approved change, treat this as a security incident: confirm with the account that made the change, and remove the membership if it can't be explained.\nWorkflow execution: {{ execution().id }}"
+      },
+      "position": {
+        "x": 1,
+        "y": 3
+      },
+      "predecessors": [
+        "check_change_window"
+      ],
+      "conditions": {
+        "states": {
+          "check_change_window": "OK"
+        },
+        "custom": "{{ result(\"detect_privileged_group_change\").records | length > 0 }}"
+      }
+    },
+    "detect_lockout_storm": {
+      "name": "detect_lockout_storm",
+      "action": "dynatrace.automations:execute-dql-query",
+      "description": "Repeated 4740 for one user (3+ in the last hour) with caller device",
+      "input": {
+        "query": "fetch logs, from: now()-60m\n| filter matchesValue(winlog.eventid, \"4740\")\n| filterOut matchesPhrase(content, \"The EventSystem sub system is suppressing duplicate event log entries\")\n| parse content, \"\"\"DATA 'Account That Was Locked Out:' DATA 'Account Name:' SPACE? LD:account EOL\"\"\"\n| parse content, \"\"\"DATA 'Caller Computer Name:' SPACE? LD:caller EOL\"\"\"\n| fieldsAdd account = trim(account), caller = trim(caller)\n| filterOut isNull(account) or account == \"-\"\n| summarize lockouts = count(), devices = collectDistinct(caller), dcs = collectDistinct(host.name),\n    first_seen = min(timestamp), last_seen = max(timestamp), by: {account}\n| filter lockouts >= 3\n| sort lockouts desc\n| limit 50"
+      },
+      "position": {
+        "x": 2,
+        "y": 1
+      },
+      "predecessors": [],
+      "conditions": {
+        "states": {},
+        "custom": ""
+      }
+    },
+    "notify_service_desk_lockouts": {
+      "name": "notify_service_desk_lockouts",
+      "action": "dynatrace.email:send-email",
+      "description": "Tell the service desk which device is causing it",
+      "input": {
+        "to": [
+          "servicedesk@example.com"
+        ],
+        "cc": [],
+        "bcc": [],
+        "subject": "[AD] Lockout storm: {{ result(\"detect_lockout_storm\").records | length }} account(s)",
+        "content": "Lockout storm: these accounts were locked out 3+ times in the last hour (event 4740).\nThe caller computer is the device still sending the old password (saved credential, mapped drive, phone mail profile, service or scheduled task).\n\n{% for r in result(\"detect_lockout_storm\").records %}\n- {{ r.account }}: {{ r.lockouts }} lockouts, caller device(s): {{ r.devices | join(\", \") }}\n  Reported by DC(s): {{ r.dcs | join(\", \") }}, last at {{ r.last_seen }}\n{% endfor %}\n\nNext step: clear the stale credential on the caller device, then unlock the account.\nWorkflow execution: {{ execution().id }}"
+      },
+      "position": {
+        "x": 2,
+        "y": 2
+      },
+      "predecessors": [
+        "detect_lockout_storm"
+      ],
+      "conditions": {
+        "states": {
+          "detect_lockout_storm": "OK"
+        },
+        "custom": "{{ result(\"detect_lockout_storm\").records | length > 0 }}"
+      }
+    }
+  },
+  "trigger": {
+    "schedule": {
+      "isActive": true,
+      "isFaulty": false,
+      "trigger": {
+        "type": "interval",
+        "intervalMinutes": 15
+      },
+      "rule": null,
+      "filterParameters": {},
+      "timezone": "Australia/Sydney",
+      "inputs": {},
+      "nextExecution": null
+    }
+  },
+  "schemaVersion": 3,
+  "isPrivate": false,
+  "type": "STANDARD",
+  "taskDefaults": {},
+  "guide": ""
+}
