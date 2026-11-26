@@ -16,12 +16,12 @@ Each layer answers a question the layer below it can't.
 |---|---|---|
 | 1. OneAgent | Is the DC healthy, and who depends on it? | Infrastructure monitoring, Smartscape, Dynatrace Intelligence |
 | 2. Logs | Who did what, where, and when? | OneAgent log module, OpenPipeline, Grail, DQL |
-| 3. AD extension | Is the directory service healthy? | Microsoft Active Directory monitoring extension |
+| 3. AD extension | Is the directory service healthy? | [Microsoft Active Directory monitoring extension](https://www.dynatrace.com/hub/detail/microsoft-active-directory-monitoring/) |
 | 4. Workflows | What happens next, automatically? | Workflows, ServiceNow, Teams or Slack |
 
 No extra tools: one agent, one data lake and one automation engine, so ops, security and the service desk see the same facts.
 
-> This repo covers layers 1, 2 and 4. Layer 3 uses the Dynatrace-provided AD extension, so there is nothing to import for it.
+> This repo covers layers 1, 2 and 4. Layer 3 uses the [Microsoft Active Directory extension](https://www.dynatrace.com/hub/detail/microsoft-active-directory-monitoring/) from the Dynatrace Hub, so there is nothing to import for it.
 
 ## What's in the repo
 
@@ -44,7 +44,7 @@ No extra tools: one agent, one data lake and one automation engine, so ops, secu
 
 Shows what your domain controllers are serving and who depends on them: Kerberos, LDAP / Global Catalog, DNS, SMB, RPC, ADWS and more. It also covers latency, retransmissions and security signals such as plain-port LDAP clients, admin sessions into DCs and clients from public IPs.
 
-- **Data:** the `default_network_flows` bucket (OneAgent network flow data).
+- **Data:** the `default_network_flows` bucket, populated by [OneAgent network connection monitoring](https://docs.dynatrace.com/docs/observe/infrastructure-observability/networks/network-devices/network-flows/oneagent-network-connection-monitoring).
 - **Filters:** AD port, domain controller, host.
 
 ![AD Traffic Details](docs/images/dashboard-ad-traffic.png)
@@ -78,7 +78,7 @@ Runs every 15 minutes (timezone set to `Australia/Sydney`). It queries Windows S
 
 ### Prerequisites
 
-- OneAgent on your domain controllers and member servers, with network flow collection enabled (for the traffic dashboard).
+- OneAgent on your domain controllers and member servers, with [network connection monitoring](https://docs.dynatrace.com/docs/observe/infrastructure-observability/networks/network-devices/network-flows/oneagent-network-connection-monitoring) enabled (for the traffic dashboard).
 - Windows Security event logs from the DCs ingested into Grail as logs (for the workflow).
 - A Dynatrace environment with Dashboards and Workflows.
 
@@ -101,8 +101,14 @@ The workflow ships with placeholders:
 - Network flows show ports and volumes, not packets. You can't see Kerberos error codes, tell NTLM from Kerberos, or tell signed from unsigned LDAP on 389.
 - Dashboards and the workflow are examples to adapt, not production-ready defaults. Tune thresholds (10+ accounts, 3+ lockouts) to your environment.
 
+## Resources
+
+- [Microsoft Active Directory monitoring extension](https://www.dynatrace.com/hub/detail/microsoft-active-directory-monitoring/): Dynatrace Hub listing for the AD extension (layer 3).
+- [OneAgent network connection monitoring](https://docs.dynatrace.com/docs/observe/infrastructure-observability/networks/network-devices/network-flows/oneagent-network-connection-monitoring): Dynatrace docs for the network flow data behind the AD Traffic Details dashboard.
+- [Active Directory audit dashboards](https://github.com/Dynatrace/community-examples/tree/main/dashboards/active-directory-audit): official Dynatrace community examples, with more AD dashboards to explore.
+
 > **Disclaimer:** This is a personal repository. It is **not an official Dynatrace product or repository** and is **not supported by Dynatrace**. The dashboards and workflow are examples shared from a tech talk, provided as-is with no warranty. Review and test them before using them in your own environment.
 
 ## License
 
-Released into the public domain under [The Unlicense](LICENSE). Take it, adapt it, and share it, no attribution needed. See the disclaimer at the top: this is not an official Dynatrace repository and is not supported by Dynatrace.
+Released into the public domain under [The Unlicense](LICENSE). Take it, adapt it, and share it, no attribution needed. See the disclaimer above: this is not an official Dynatrace repository and is not supported by Dynatrace.
